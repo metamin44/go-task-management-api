@@ -1,0 +1,1327 @@
+basePath: /
+consumes:
+- application/json
+definitions:
+  handler.addMemberRequest:
+    properties:
+      user_id:
+        type: string
+    type: object
+  handler.changePasswordRequest:
+    properties:
+      current_password:
+        type: string
+      new_password:
+        type: string
+    type: object
+  handler.createProjectRequest:
+    properties:
+      description:
+        type: string
+      name:
+        type: string
+    type: object
+  handler.createTaskRequest:
+    properties:
+      assigned_to:
+        type: string
+      description:
+        type: string
+      due_at:
+        type: string
+      priority:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+    type: object
+  handler.errorBody:
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+    type: object
+  handler.errorEnvelope:
+    properties:
+      error:
+        $ref: '#/definitions/handler.errorBody'
+      request_id:
+        type: string
+    type: object
+  handler.listResponse:
+    properties:
+      data: {}
+      limit:
+        type: integer
+      offset:
+        type: integer
+    type: object
+  handler.loginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  handler.logoutAllResponse:
+    properties:
+      revoked_sessions:
+        type: integer
+    type: object
+  handler.memberResponse:
+    properties:
+      joined_at:
+        type: string
+      project_id:
+        type: string
+      role:
+        type: string
+      user_id:
+        type: string
+    type: object
+  handler.projectResponse:
+    properties:
+      created_at:
+        type: string
+      created_by:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handler.refreshTokenRequest:
+    properties:
+      refresh_token:
+        type: string
+    type: object
+  handler.registerRequest:
+    properties:
+      email:
+        type: string
+      name:
+        type: string
+      password:
+        type: string
+    type: object
+  handler.statusResponse:
+    properties:
+      status:
+        type: string
+    type: object
+  handler.taskResponse:
+    properties:
+      assigned_to:
+        type: string
+      created_at:
+        type: string
+      created_by:
+        type: string
+      description:
+        type: string
+      due_at:
+        type: string
+      id:
+        type: string
+      priority:
+        type: string
+      project_id:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  handler.tokenPairResponse:
+    properties:
+      access_token:
+        type: string
+      refresh_token:
+        type: string
+      token_type:
+        type: string
+    type: object
+  handler.transferOwnershipRequest:
+    properties:
+      new_owner_id:
+        type: string
+    type: object
+  handler.updateProfileRequest:
+    properties:
+      email:
+        type: string
+      name:
+        type: string
+    type: object
+  handler.updateProjectRequest:
+    properties:
+      description:
+        description: String or null (null clears the description); omitted keeps it.
+        type: string
+      name:
+        type: string
+    type: object
+  handler.updateRoleRequest:
+    properties:
+      role:
+        type: string
+    type: object
+  handler.updateTaskRequest:
+    properties:
+      assigned_to:
+        description: Assignee UUID string, or null to unassign; omitted keeps it.
+        type: string
+      description:
+        description: String only; null is rejected (service cannot NULL the description).
+        type: string
+      due_at:
+        description: RFC3339 timestamp string, or null to clear; omitted keeps it.
+        type: string
+      priority:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+    type: object
+  handler.userResponse:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      updated_at:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    REST API for users, projects, memberships, and tasks.
+    Authorization is enforced in the service layer; access
+    tokens are short-lived HS256 JWTs (typ=access), refresh
+    tokens are opaque and rotate with reuse detection.
+  title: Task Management API
+  version: "1.0"
+paths:
+  /api/v1/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Verifies credentials and issues an access token plus a refresh
+        token with a fresh session. Unknown email and wrong password return the same
+        401.
+      parameters:
+      - description: Credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.loginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.tokenPairResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "429":
+          description: rate_limited (Retry-After header)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Log in
+      tags:
+      - auth
+  /api/v1/auth/logout:
+    post:
+      consumes:
+      - application/json
+      description: Revokes the session of the presented refresh token. Idempotent
+        for already-revoked tokens.
+      parameters:
+      - description: Current refresh token
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.refreshTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: session revoked
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: 'unauthorized: unknown token'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Log out
+      tags:
+      - auth
+  /api/v1/auth/logout-all:
+    post:
+      description: Revokes all active refresh sessions of the authenticated user.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.logoutAllResponse'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Log out all sessions
+      tags:
+      - auth
+  /api/v1/auth/refresh:
+    post:
+      consumes:
+      - application/json
+      description: Rotates the refresh token (row-locked, reuse-detecting). Reuse
+        revokes the whole session and returns 401 with code token_reused.
+      parameters:
+      - description: Current refresh token
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.refreshTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.tokenPairResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized or token_reused
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "429":
+          description: rate_limited (Retry-After header)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "503":
+          description: 'unavailable: contention, retry'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Refresh tokens
+      tags:
+      - auth
+  /api/v1/auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Creates a user; only an argon2id hash of the password is stored.
+      parameters:
+      - description: Account details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.registerRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.userResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: email already registered'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "413":
+          description: payload_too_large
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "415":
+          description: unsupported_media_type
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "429":
+          description: rate_limited (Retry-After header)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Register a new account
+      tags:
+      - auth
+  /api/v1/projects:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'data: []projectResponse'
+          schema:
+            $ref: '#/definitions/handler.listResponse'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List my projects
+      tags:
+      - projects
+    post:
+      consumes:
+      - application/json
+      description: Atomically creates the project and the creator's owner membership.
+      parameters:
+      - description: Project details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createProjectRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.projectResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create project
+      tags:
+      - projects
+  /api/v1/projects/{id}:
+    delete:
+      description: Owner only. Memberships and tasks cascade.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: project deleted
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: owner only'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Delete project
+      tags:
+      - projects
+    get:
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.projectResponse'
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Get project
+      tags:
+      - projects
+    patch:
+      consumes:
+      - application/json
+      description: Owner/admin only. Omitted fields keep their values; description=null
+        clears it.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Fields to update
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateProjectRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.projectResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: concurrently modified'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update project
+      tags:
+      - projects
+  /api/v1/projects/{id}/members:
+    get:
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'data: []memberResponse'
+          schema:
+            $ref: '#/definitions/handler.listResponse'
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List project members
+      tags:
+      - members
+    post:
+      consumes:
+      - application/json
+      description: Owner/admin only. The target user must exist; new members start
+        with role member.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: User to add
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.addMemberRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.memberResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: 'not_found: unknown target user'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: already a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Add project member
+      tags:
+      - members
+  /api/v1/projects/{id}/members/{userId}:
+    delete:
+      description: Owner/admin, or non-owner self-leave. 409 while the member has
+        assigned tasks; the owner must transfer ownership first (403).
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Target user UUID
+        in: path
+        name: userId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: member removed
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: 'not_found: target not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: assigned tasks exist'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Remove project member
+      tags:
+      - members
+    patch:
+      consumes:
+      - application/json
+      description: Owner/admin only. Role must be admin or member; the owner role
+        changes exclusively via transfer-ownership.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Target user UUID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: New role (admin|member)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateRoleRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: role updated
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden (includes attempts to demote the owner)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: 'not_found: target not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Change member role
+      tags:
+      - members
+  /api/v1/projects/{id}/tasks:
+    get:
+      description: 'Members only. Filters: status, priority, assigned_to, due_after,
+        due_before (RFC3339). Sorting: sort_by=created_at|due_at|priority|status,
+        sort_order=asc|desc. Pagination: limit (1-200, default 50), offset (>=0).'
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Page size (1-200, default 50)
+        in: query
+        name: limit
+        type: integer
+      - description: Offset (default 0)
+        in: query
+        name: offset
+        type: integer
+      - description: todo|in_progress|done
+        in: query
+        name: status
+        type: string
+      - description: low|medium|high|urgent
+        in: query
+        name: priority
+        type: string
+      - description: Assignee UUID
+        in: query
+        name: assigned_to
+        type: string
+      - description: RFC3339 lower bound
+        in: query
+        name: due_after
+        type: string
+      - description: RFC3339 upper bound
+        in: query
+        name: due_before
+        type: string
+      - description: created_at|due_at|priority|status
+        in: query
+        name: sort_by
+        type: string
+      - description: asc|desc
+        in: query
+        name: sort_order
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'data: []taskResponse, limit, offset'
+          schema:
+            $ref: '#/definitions/handler.listResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List project tasks
+      tags:
+      - tasks
+    post:
+      consumes:
+      - application/json
+      description: 'Any project member may create. Assignee, when set, must be a member
+        of the same project. Defaults: status=todo, priority=medium.'
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.createTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.taskResponse'
+        "400":
+          description: validation_error (incl. non-member assignee)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Create task
+      tags:
+      - tasks
+  /api/v1/projects/{id}/tasks/{taskId}:
+    delete:
+      description: 'Write policy: task creator, current assignee, or project owner/admin.'
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task UUID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: task deleted
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Delete task
+      tags:
+      - tasks
+    get:
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task UUID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.taskResponse'
+        "400":
+          description: 'validation_error: invalid UUID'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found (also when the task belongs to another project)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Get task
+      tags:
+      - tasks
+    patch:
+      consumes:
+      - application/json
+      description: 'Write policy: task creator, current assignee, or project owner/admin.
+        assigned_to=null unassigns; due_at=null clears the due date; omitted fields
+        are unchanged. project_id and created_by are immutable.'
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Task UUID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      - description: Fields to update
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.taskResponse'
+        "400":
+          description: validation_error (incl. non-member assignee)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: forbidden
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: not_found
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: concurrently modified'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update task
+      tags:
+      - tasks
+  /api/v1/projects/{id}/transfer-ownership:
+    post:
+      consumes:
+      - application/json
+      description: Owner only. Transactional demote-before-promote under the project
+        row lock; target must be an existing member; self-transfer is a no-op.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: New owner (existing member)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.transferOwnershipRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: ownership transferred
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: owner only'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "404":
+          description: 'not_found: target not a member'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Transfer project ownership
+      tags:
+      - members
+  /api/v1/users/me:
+    delete:
+      description: Hard delete. Returns 409 while created projects/tasks or memberships
+        exist (RESTRICT chain).
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: account deleted
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: reference_violation
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Delete account
+      tags:
+      - users
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.userResponse'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Get current profile
+      tags:
+      - users
+    patch:
+      consumes:
+      - application/json
+      description: Partial update of name/email. Email is normalized; duplicates return
+        409.
+      parameters:
+      - description: Fields to update (at least one)
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.updateProfileRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.userResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "409":
+          description: 'conflict: email in use or concurrently modified'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Update current profile
+      tags:
+      - users
+  /api/v1/users/me/password:
+    patch:
+      consumes:
+      - application/json
+      description: Verifies the current password, stores the new argon2id hash, and
+        revokes ALL refresh sessions atomically.
+      parameters:
+      - description: Current and new password
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.changePasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: password changed; all sessions revoked
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: 'unauthorized: wrong current password'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "429":
+          description: rate_limited (Retry-After header)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Change password
+      tags:
+      - users
+  /api/v1/users/me/tasks:
+    get:
+      description: Cross-project listing forced to the authenticated assignee. Same
+        filtering/sorting/pagination as project task lists, plus optional project_id.
+      parameters:
+      - description: Restrict to one project UUID
+        in: query
+        name: project_id
+        type: string
+      - description: Page size (1-200, default 50)
+        in: query
+        name: limit
+        type: integer
+      - description: Offset (default 0)
+        in: query
+        name: offset
+        type: integer
+      - description: todo|in_progress|done
+        in: query
+        name: status
+        type: string
+      - description: low|medium|high|urgent
+        in: query
+        name: priority
+        type: string
+      - description: RFC3339 lower bound
+        in: query
+        name: due_after
+        type: string
+      - description: RFC3339 upper bound
+        in: query
+        name: due_before
+        type: string
+      - description: created_at|due_at|priority|status
+        in: query
+        name: sort_by
+        type: string
+      - description: asc|desc
+        in: query
+        name: sort_order
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'data: []taskResponse, limit, offset'
+          schema:
+            $ref: '#/definitions/handler.listResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: unauthorized
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "403":
+          description: 'forbidden: not a member of project_id'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List my assigned tasks
+      tags:
+      - tasks
+  /health:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.statusResponse'
+      summary: Liveness probe
+      tags:
+      - health
+  /ready:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.statusResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Readiness probe
+      tags:
+      - health
+produces:
+- application/json
+securityDefinitions:
+  BearerAuth:
+    description: 'Enter: Bearer <access_token>'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

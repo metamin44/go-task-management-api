@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Formatting, vet, build, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: Unit tests (no Docker required)
+        run: go test -count=1 ./...
+
+  integration:
+    name: Integration tests T1-T7 (Testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet (integration tag)
+        run: go vet -tags=integration ./...
+      - name: Integration tests (isolated PostgreSQL container via runner Docker)
+        run: go test -count=1 -tags=integration -timeout=15m ./internal/integration/...

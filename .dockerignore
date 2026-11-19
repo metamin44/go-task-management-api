@@ -1,0 +1,8 @@
+# Never ship secrets or repository metadata in build contexts/images.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.md
+LICENSE
