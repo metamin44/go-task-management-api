@@ -22,10 +22,28 @@ import (
 func seedReset(t *testing.T, f *fixture, uid domain.UUID, raw string, expires time.Time) {
 	t.Helper()
 	sum := sha256.Sum256([]byte(raw))
-	if err := f.resets.Create(context.Background(), &domain.PasswordResetToken{
+	tok := &domain.PasswordResetToken{
 		ID: domain.NewUUID(), UserID: uid, TokenHash: sum[:], ExpiresAt: expires,
-	}); err != nil {
-		t.Fatalf("seed reset token: %v", err)
+	}
+	if expires.After(time.Now()) {
+		// Normal issuance path: production Create (DB fills created_at = now()).
+		if err := f.resets.Create(context.Background(), tok); err != nil {
+			t.Fatalf("seed reset token: %v", err)
+		}
+		return
+	}
+	// An already-expired token cannot be inserted via Create: the schema enforces
+	// CHECK (expires_at > created_at) and Create lets the DB default created_at to
+	// now(), so a past expires_at would violate that invariant (23514 → invalid
+	// input). Craft the expired row directly with created_at safely before
+	// expires_at (both in the past). Test setup only — production validation is
+	// unchanged, and the token is still expired relative to now().
+	createdAt := expires.Add(-time.Minute)
+	if _, err := f.pool.Exec(context.Background(),
+		`INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tok.ID, tok.UserID, tok.TokenHash, tok.ExpiresAt, createdAt); err != nil {
+		t.Fatalf("seed expired reset token: %v", err)
 	}
 }
 
