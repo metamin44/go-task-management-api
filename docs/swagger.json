@@ -14,6 +14,58 @@
     },
     "basePath": "/",
     "paths": {
+        "/api/v1/auth/forgot-password": {
+            "post": {
+                "description": "Always returns the same generic acknowledgement whether or not the email is registered. When the account exists, a single-use reset code (15-minute default TTL) is emailed in the message body — never embedded in a URL — via a bounded, panic-recovered async workflow. The synchronous path does identical work for known and unknown emails (no timing oracle). Rate-limited per client IP.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Request a password reset code",
+                "parameters": [
+                    {
+                        "description": "Account email",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.forgotPasswordRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "generic acknowledgement (no account-existence signal)",
+                        "schema": {
+                            "$ref": "#/definitions/handler.messageResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "validation_error",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    },
+                    "429": {
+                        "description": "rate_limited (Retry-After header)",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    },
+                    "500": {
+                        "description": "internal_error",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/auth/login": {
             "post": {
                 "description": "Verifies credentials and issues an access token plus a refresh token with a fresh session. Unknown email and wrong password return the same 401.",
@@ -279,6 +331,55 @@
                     },
                     "429": {
                         "description": "rate_limited (Retry-After header)",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    },
+                    "500": {
+                        "description": "internal_error",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/reset-password": {
+            "post": {
+                "description": "Consumes the valid single-use reset code copied from the email body, stores a new argon2id hash, and revokes ALL refresh sessions atomically. Unknown, expired, and already-used codes return the same 401.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Reset password with a code",
+                "parameters": [
+                    {
+                        "description": "Emailed reset code and new password",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.resetPasswordRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "password reset; all sessions revoked"
+                    },
+                    "400": {
+                        "description": "validation_error",
+                        "schema": {
+                            "$ref": "#/definitions/handler.errorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "unauthorized: invalid, expired, or reused token",
                         "schema": {
                             "$ref": "#/definitions/handler.errorEnvelope"
                         }
@@ -1771,6 +1872,14 @@
                 }
             }
         },
+        "handler.forgotPasswordRequest": {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string"
+                }
+            }
+        },
         "handler.listResponse": {
             "type": "object",
             "properties": {
@@ -1819,6 +1928,14 @@
                 }
             }
         },
+        "handler.messageResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
         "handler.projectResponse": {
             "type": "object",
             "properties": {
@@ -1860,6 +1977,18 @@
                     "type": "string"
                 },
                 "password": {
+                    "type": "string"
+                }
+            }
+        },
+        "handler.resetPasswordRequest": {
+            "type": "object",
+            "properties": {
+                "new_password": {
+                    "type": "string"
+                },
+                "token": {
+                    "description": "Token is the single-use reset code copied from the email body (S-05). It\nis never carried in a URL, so it cannot leak via browser history/Referer.",
                     "type": "string"
                 }
             }

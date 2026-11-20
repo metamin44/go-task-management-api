@@ -29,6 +29,8 @@ services:
       # Local container has no TLS. Production deployments MUST use verify-full.
       DB_SSLMODE: disable
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in the environment or .env}
+      # cmd/migrate loads database settings only (config.LoadDB); it does not
+      # require AUTH_ACCESS_SECRET or SMTP configuration.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: "no"
@@ -57,6 +59,15 @@ services:
       AUTH_ACCESS_SECRET: ${AUTH_ACCESS_SECRET:?AUTH_ACCESS_SECRET must be set (at least 32 bytes)}
       AUTH_ACCESS_TTL: 15m
       AUTH_REFRESH_TTL: 720h
+      AUTH_RESET_TTL: 15m
+      PASSWORD_RESET_BASE_URL: ${PASSWORD_RESET_BASE_URL:?PASSWORD_RESET_BASE_URL must be set (absolute http(s) URL)}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST must be set in the environment or .env}
+      SMTP_PORT: "587"
+      SMTP_FROM: ${SMTP_FROM:?SMTP_FROM must be set in the environment or .env}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # Secure by default; set false only for a local dev SMTP server (S-01).
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-true}
     ports:
       - "127.0.0.1:8080:8080"
     extra_hosts:

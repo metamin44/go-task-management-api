@@ -74,6 +74,7 @@ func run() error {
 	// Repositories (SQL-first, authorization-agnostic) + transactor.
 	users := repository.NewUserRepository(pool)
 	sessions := repository.NewRefreshSessionRepository(pool)
+	resets := repository.NewPasswordResetTokenRepository(pool)
 	projects := repository.NewProjectRepository(pool)
 	members := repository.NewProjectMemberRepository(pool)
 	tasks := repository.NewTaskRepository(pool)
@@ -84,7 +85,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	auth, err := service.NewAuthService(users, sessions, tx, service.NewArgon2idHasher(), accessTokens, cfg.Auth.RefreshTTL)
+	hasher := service.NewArgon2idHasher()
+	auth, err := service.NewAuthService(users, sessions, tx, hasher, accessTokens, cfg.Auth.RefreshTTL)
+	if err != nil {
+		return err
+	}
+	mailer := service.NewSMTPMailer(cfg.SMTP.Host, cfg.SMTP.Addr(), cfg.SMTP.Username, cfg.SMTP.Password, cfg.SMTP.From, cfg.SMTP.RequireTLS)
+	resetSvc, err := service.NewPasswordResetService(users, resets, sessions, tx, hasher, mailer, cfg.Auth.ResetTTL, cfg.Auth.ResetBaseURL, logger)
 	if err != nil {
 		return err
 	}
@@ -113,7 +120,7 @@ func run() error {
 
 	// HTTP layer. CORS stays disabled (no AllowedOrigins): same-origin only
 	// until an explicit whitelist is approved for a deployment.
-	api := handler.New(auth, userSvc, projectSvc, memberSvc, taskSvc)
+	api := handler.New(auth, resetSvc, userSvc, projectSvc, memberSvc, taskSvc)
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true

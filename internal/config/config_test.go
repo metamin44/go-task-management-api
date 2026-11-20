@@ -21,11 +21,14 @@ const dummyAuthSecret = "0123456789abcdef0123456789abcdef"
 
 func validEnv() map[string]string {
 	return map[string]string{
-		"DB_NAME":            "task_management",
-		"DB_USER":            "app_user",
-		"DB_PASSWORD":        dummySecret,
-		"DB_SSLMODE":         "disable",
-		"AUTH_ACCESS_SECRET": dummyAuthSecret,
+		"DB_NAME":                 "task_management",
+		"DB_USER":                 "app_user",
+		"DB_PASSWORD":             dummySecret,
+		"DB_SSLMODE":              "disable",
+		"AUTH_ACCESS_SECRET":      dummyAuthSecret,
+		"SMTP_HOST":               "smtp.example.com",
+		"SMTP_FROM":               "no-reply@example.com",
+		"PASSWORD_RESET_BASE_URL": "https://app.example.com/reset-password",
 	}
 }
 
@@ -71,6 +74,12 @@ func TestLoadDefaults(t *testing.T) {
 		{"AUTH_ACCESS_TTL", cfg.Auth.AccessTTL, 15 * time.Minute},
 		{"AUTH_REFRESH_TTL", cfg.Auth.RefreshTTL, 720 * time.Hour},
 		{"AUTH_RATE_LIMIT_INTERVAL", cfg.Auth.RateLimitInterval, time.Second},
+		{"AUTH_RESET_TTL", cfg.Auth.ResetTTL, 15 * time.Minute},
+		{"SMTP_PORT", cfg.SMTP.Port, 587},
+		{"SMTP_HOST", cfg.SMTP.Host, "smtp.example.com"},
+		{"SMTP_FROM", cfg.SMTP.From, "no-reply@example.com"},
+		{"SMTP_REQUIRE_TLS", cfg.SMTP.RequireTLS, true},
+		{"PASSWORD_RESET_BASE_URL", cfg.Auth.ResetBaseURL, "https://app.example.com/reset-password"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -142,7 +151,7 @@ func TestLoadOverrides(t *testing.T) {
 }
 
 func TestLoadRequired(t *testing.T) {
-	for _, key := range []string{"DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SSLMODE", "AUTH_ACCESS_SECRET"} {
+	for _, key := range []string{"DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SSLMODE", "AUTH_ACCESS_SECRET", "SMTP_HOST", "SMTP_FROM", "PASSWORD_RESET_BASE_URL"} {
 		t.Run("missing_"+key, func(t *testing.T) {
 			env := validEnv()
 			delete(env, key)
@@ -346,7 +355,7 @@ func TestDotenvMalformedFails(t *testing.T) {
 }
 
 func TestDotenvValuesUsedWhenEnvAbsent(t *testing.T) {
-	path := writeFixture(t, "DB_NAME=filedb\nDB_USER=fileuser\nDB_PASSWORD=file-"+dummySecret+"\nDB_SSLMODE=disable\nDB_HOST=10.10.10.10\nHTTP_PORT=7070\nAUTH_ACCESS_SECRET="+dummyAuthSecret+"\n")
+	path := writeFixture(t, "DB_NAME=filedb\nDB_USER=fileuser\nDB_PASSWORD=file-"+dummySecret+"\nDB_SSLMODE=disable\nDB_HOST=10.10.10.10\nHTTP_PORT=7070\nAUTH_ACCESS_SECRET="+dummyAuthSecret+"\nSMTP_HOST=smtp.file.com\nSMTP_FROM=file@example.com\nPASSWORD_RESET_BASE_URL=https://file.example.com/reset\n")
 	cfg, err := load(mapLookup(map[string]string{}), path)
 	if err != nil {
 		t.Fatalf("load from dotenv only: %v", err)
@@ -373,7 +382,7 @@ func TestDotenvValuesUsedWhenEnvAbsent(t *testing.T) {
 }
 
 func TestEnvPrecedenceOverDotenv(t *testing.T) {
-	path := writeFixture(t, "DB_NAME=filedb\nDB_USER=fileuser\nDB_PASSWORD=file-"+dummySecret+"\nDB_SSLMODE=disable\nDB_HOST=10.10.10.10\nHTTP_PORT=7070\nAUTH_ACCESS_SECRET="+dummyAuthSecret+"\n")
+	path := writeFixture(t, "DB_NAME=filedb\nDB_USER=fileuser\nDB_PASSWORD=file-"+dummySecret+"\nDB_SSLMODE=disable\nDB_HOST=10.10.10.10\nHTTP_PORT=7070\nAUTH_ACCESS_SECRET="+dummyAuthSecret+"\nSMTP_HOST=smtp.file.com\nSMTP_FROM=file@example.com\nPASSWORD_RESET_BASE_URL=https://file.example.com/reset\n")
 	env := map[string]string{
 		"DB_NAME":     "envdb",
 		"DB_PASSWORD": "env-" + dummySecret,
@@ -522,4 +531,233 @@ func TestIdentifiersNotTrimmed(t *testing.T) {
 	if cfg.DB.Name != " mydb " {
 		t.Error("validation must not trim or modify accepted values")
 	}
+}
+
+func TestLoadSMTPAndResetOverrides(t *testing.T) {
+	env := validEnv()
+	env["SMTP_HOST"] = "mail.internal"
+	env["SMTP_PORT"] = "2525"
+	env["SMTP_USERNAME"] = "mailer"
+	env["SMTP_PASSWORD"] = "smtp-" + dummySecret
+	env["SMTP_FROM"] = "accounts@example.com"
+	env["AUTH_RESET_TTL"] = "30m"
+	env["PASSWORD_RESET_BASE_URL"] = "https://app.example.com/reset"
+	cfg, err := load(mapLookup(env), "")
+	if err != nil {
+		t.Fatalf("load with SMTP overrides: %v", err)
+	}
+	if cfg.SMTP.Host != "mail.internal" || cfg.SMTP.Port != 2525 ||
+		cfg.SMTP.Username != "mailer" || cfg.SMTP.From != "accounts@example.com" {
+		t.Errorf("SMTP overrides not applied: %+v", cfg.SMTP)
+	}
+	if cfg.SMTP.Addr() != "mail.internal:2525" {
+		t.Errorf("SMTP Addr = %q, want mail.internal:2525", cfg.SMTP.Addr())
+	}
+	if cfg.Auth.ResetTTL != 30*time.Minute {
+		t.Errorf("AUTH_RESET_TTL = %v, want 30m", cfg.Auth.ResetTTL)
+	}
+	if cfg.Auth.ResetBaseURL != "https://app.example.com/reset" {
+		t.Errorf("PASSWORD_RESET_BASE_URL = %q", cfg.Auth.ResetBaseURL)
+	}
+	// Secret asserted separately: never print its value, even on failure.
+	if cfg.SMTP.Password != "smtp-"+dummySecret {
+		t.Error("SMTP_PASSWORD not loaded correctly (value withheld)")
+	}
+}
+
+func TestLoadSMTPAuthPair(t *testing.T) {
+	t.Run("username_without_password", func(t *testing.T) {
+		env := validEnv()
+		env["SMTP_USERNAME"] = "mailer"
+		_, err := load(mapLookup(env), "")
+		if err == nil || !strings.Contains(err.Error(), "SMTP_PASSWORD") {
+			t.Fatalf("expected SMTP_PASSWORD required error, got %v", err)
+		}
+	})
+	t.Run("password_without_username", func(t *testing.T) {
+		env := validEnv()
+		env["SMTP_PASSWORD"] = "smtp-" + dummySecret
+		_, err := load(mapLookup(env), "")
+		if err == nil || !strings.Contains(err.Error(), "SMTP_USERNAME") {
+			t.Fatalf("expected SMTP_USERNAME required error, got %v", err)
+		}
+		if strings.Contains(err.Error(), dummySecret) {
+			t.Error("error must never contain the SMTP secret")
+		}
+	})
+	t.Run("both_absent_is_allowed", func(t *testing.T) {
+		cfg, err := load(mapLookup(validEnv()), "")
+		if err != nil {
+			t.Fatalf("unauthenticated SMTP must be allowed: %v", err)
+		}
+		if cfg.SMTP.Username != "" || cfg.SMTP.Password != "" {
+			t.Error("optional SMTP credentials must default to empty")
+		}
+	})
+}
+
+func TestLoadResetConfigInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"reset_ttl_invalid", "AUTH_RESET_TTL", "abc"},
+		{"reset_ttl_zero", "AUTH_RESET_TTL", "0s"},
+		{"reset_ttl_negative", "AUTH_RESET_TTL", "-15m"},
+		{"base_url_not_url", "PASSWORD_RESET_BASE_URL", "not a url"},
+		{"base_url_relative", "PASSWORD_RESET_BASE_URL", "/reset-password"},
+		{"base_url_bad_scheme", "PASSWORD_RESET_BASE_URL", "ftp://app.example.com/reset"},
+		{"base_url_with_query", "PASSWORD_RESET_BASE_URL", "https://app.example.com/reset?token=abc"},
+		{"base_url_with_fragment", "PASSWORD_RESET_BASE_URL", "https://app.example.com/reset#section"},
+		{"base_url_with_userinfo", "PASSWORD_RESET_BASE_URL", "https://user:pass@app.example.com/reset"},
+		{"base_url_no_host", "PASSWORD_RESET_BASE_URL", "https:///reset"},
+		{"base_url_opaque", "PASSWORD_RESET_BASE_URL", "https:opaque-part"},
+		{"smtp_port_zero", "SMTP_PORT", "0"},
+		{"smtp_port_not_int", "SMTP_PORT", "abc"},
+		{"smtp_from_no_at", "SMTP_FROM", "not-an-address"},
+		{"smtp_host_blank", "SMTP_HOST", "   "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			env[tc.key] = tc.value
+			_, err := load(mapLookup(env), "")
+			if err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected error naming %s, got %v", tc.key, err)
+			}
+			if strings.Contains(err.Error(), dummySecret) {
+				t.Error("error must never contain the supplied secret")
+			}
+		})
+	}
+}
+
+// TestLoadSMTPRequireTLS covers S-01 configuration: TLS is required by default,
+// can be explicitly disabled for local development, and rejects empty or
+// unparseable values with a name-only error.
+func TestLoadSMTPRequireTLS(t *testing.T) {
+	t.Run("default_true", func(t *testing.T) {
+		cfg, err := load(mapLookup(validEnv()), "")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.SMTP.RequireTLS {
+			t.Error("SMTP_REQUIRE_TLS must default to true (secure by default)")
+		}
+	})
+	t.Run("explicit_false", func(t *testing.T) {
+		env := validEnv()
+		env["SMTP_REQUIRE_TLS"] = "false"
+		cfg, err := load(mapLookup(env), "")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.SMTP.RequireTLS {
+			t.Error("SMTP_REQUIRE_TLS=false must be honored for local dev")
+		}
+	})
+	t.Run("explicit_true", func(t *testing.T) {
+		env := validEnv()
+		env["SMTP_REQUIRE_TLS"] = "true"
+		cfg, err := load(mapLookup(env), "")
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if !cfg.SMTP.RequireTLS {
+			t.Error("SMTP_REQUIRE_TLS=true must be honored")
+		}
+	})
+	for _, bad := range []string{"", "banana", "yesplease"} {
+		t.Run("invalid_"+bad, func(t *testing.T) {
+			env := validEnv()
+			env["SMTP_REQUIRE_TLS"] = bad
+			_, err := load(mapLookup(env), "")
+			if err == nil || !strings.Contains(err.Error(), "SMTP_REQUIRE_TLS") {
+				t.Fatalf("expected error naming SMTP_REQUIRE_TLS for %q, got %v", bad, err)
+			}
+		})
+	}
+}
+
+// TestLoadDBOnly covers S-03: cmd/migrate loads database settings only and must
+// succeed without any application secrets (AUTH_ACCESS_SECRET) or SMTP/reset
+// configuration, while still enforcing the database rules.
+func TestLoadDBOnly(t *testing.T) {
+	dbEnv := func() map[string]string {
+		return map[string]string{
+			"DB_NAME":     "task_management",
+			"DB_USER":     "app_user",
+			"DB_PASSWORD": dummySecret,
+			"DB_SSLMODE":  "disable",
+		}
+	}
+	t.Run("succeeds_without_app_secrets", func(t *testing.T) {
+		db, err := loadDB(mapLookup(dbEnv()), "")
+		if err != nil {
+			t.Fatalf("DB-only load must not require AUTH/SMTP settings: %v", err)
+		}
+		if db.Name != "task_management" || db.User != "app_user" || db.SSLMode != "disable" {
+			t.Errorf("DB fields not loaded: %+v", db)
+		}
+		if db.Host != "127.0.0.1" || db.Port != 5432 || db.MaxConns != 10 || db.MinConns != 0 {
+			t.Errorf("DB defaults not applied: %+v", db)
+		}
+		if db.Password != dummySecret {
+			t.Error("DB_PASSWORD not loaded correctly (value withheld)")
+		}
+	})
+	t.Run("full_env_also_works", func(t *testing.T) {
+		// Extra app keys present must be ignored, not required.
+		db, err := loadDB(mapLookup(validEnv()), "")
+		if err != nil {
+			t.Fatalf("DB-only load with full env: %v", err)
+		}
+		if db.Name != "task_management" {
+			t.Errorf("DB_NAME = %q", db.Name)
+		}
+	})
+	t.Run("missing_required_db_field", func(t *testing.T) {
+		for _, key := range []string{"DB_NAME", "DB_USER", "DB_PASSWORD", "DB_SSLMODE"} {
+			env := dbEnv()
+			delete(env, key)
+			_, err := loadDB(mapLookup(env), "")
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("expected error naming %s, got %v", key, err)
+			}
+			if strings.Contains(err.Error(), dummySecret) {
+				t.Error("error must never contain the supplied secret")
+			}
+		}
+	})
+	t.Run("invalid_db_value", func(t *testing.T) {
+		env := dbEnv()
+		env["DB_SSLMODE"] = "banana"
+		_, err := loadDB(mapLookup(env), "")
+		if err == nil || !strings.Contains(err.Error(), "DB_SSLMODE") {
+			t.Fatalf("expected DB_SSLMODE enum error, got %v", err)
+		}
+	})
+	t.Run("cross_field_min_above_max", func(t *testing.T) {
+		env := dbEnv()
+		env["DB_MIN_CONNS"] = "20"
+		env["DB_MAX_CONNS"] = "10"
+		_, err := loadDB(mapLookup(env), "")
+		if err == nil || !strings.Contains(err.Error(), "DB_MIN_CONNS") {
+			t.Fatalf("expected cross-field error, got %v", err)
+		}
+	})
+	t.Run("dotenv_seed", func(t *testing.T) {
+		path := writeFixture(t, "DB_NAME=filedb\nDB_USER=fileuser\nDB_PASSWORD=file-"+dummySecret+"\nDB_SSLMODE=disable\n")
+		db, err := loadDB(mapLookup(map[string]string{}), path)
+		if err != nil {
+			t.Fatalf("DB-only load from dotenv: %v", err)
+		}
+		if db.Name != "filedb" || db.User != "fileuser" {
+			t.Errorf("dotenv DB fields not applied: %+v", db)
+		}
+		if db.Password != "file-"+dummySecret {
+			t.Error("DB_PASSWORD from dotenv not applied (value withheld)")
+		}
+	})
 }

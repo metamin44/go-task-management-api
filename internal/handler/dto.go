@@ -15,6 +15,12 @@ type statusResponse struct {
 	Status string `json:"status"`
 }
 
+// messageResponse carries a generic, static client message (e.g. the
+// enumeration-safe forgot-password acknowledgement).
+type messageResponse struct {
+	Message string `json:"message"`
+}
+
 type userResponse struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`

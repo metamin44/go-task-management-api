@@ -45,6 +45,24 @@ type RefreshSessionRepository interface {
 	DeleteExpiredBatch(ctx context.Context, retention time.Duration, limit int) (int64, error)
 }
 
+// PasswordResetTokenRepository covers single-use password-reset tokens.
+// Reset orchestration (locking, expiry/single-use checks, atomic password
+// change + consumption + session revocation) lives in the service layer
+// inside a transaction.
+type PasswordResetTokenRepository interface {
+	// Create inserts a new unconsumed token row (consumed_at NULL).
+	Create(ctx context.Context, t *PasswordResetToken) error
+	// GetByTokenHashForUpdate selects the row with FOR UPDATE; must run inside
+	// a transaction to serialize concurrent reset attempts.
+	GetByTokenHashForUpdate(ctx context.Context, tokenHash []byte) (*PasswordResetToken, error)
+	// MarkConsumed records successful use; matches only unconsumed rows
+	// (WHERE consumed_at IS NULL). ErrNotFound if missing or already consumed.
+	MarkConsumed(ctx context.Context, id UUID) error
+	// DeleteUnconsumedByUser removes a user's outstanding unconsumed tokens so
+	// a fresh request supersedes any previous link. Returns rows deleted.
+	DeleteUnconsumedByUser(ctx context.Context, userID UUID) (int64, error)
+}
+
 // ProjectRepository covers project CRUD and the per-project mutex used to
 // serialize membership mutations.
 type ProjectRepository interface {

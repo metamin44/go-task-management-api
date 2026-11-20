@@ -55,7 +55,22 @@ type AuthConfig struct {
 	RefreshTTL        time.Duration // AUTH_REFRESH_TTL: > 0, default 720h (30 days)
 	RateLimitInterval time.Duration // AUTH_RATE_LIMIT_INTERVAL: > 0, default 1s (per-IP auth rate limit)
 	CleanupInterval   time.Duration // AUTH_CLEANUP_INTERVAL: > 0, default 1h (refresh-session cleanup tick)
+	ResetTTL          time.Duration // AUTH_RESET_TTL: > 0, default 15m (password-reset token lifetime)
+	ResetBaseURL      string        // PASSWORD_RESET_BASE_URL: required absolute http(s) URL for the reset link
 }
+
+// SMTPConfig holds outbound email settings for password-reset messages.
+type SMTPConfig struct {
+	Host       string // SMTP_HOST: required
+	Port       int    // SMTP_PORT: 1-65535, default 587
+	Username   string // SMTP_USERNAME: optional; authentication is enabled when set
+	Password   string // SMTP_PASSWORD: required when SMTP_USERNAME is set — never log or print
+	From       string // SMTP_FROM: required sender address
+	RequireTLS bool   // SMTP_REQUIRE_TLS: default true; fail closed without STARTTLS (localhost dev exception when false)
+}
+
+// Addr returns the host:port dial address for the SMTP server.
+func (c SMTPConfig) Addr() string { return net.JoinHostPort(c.Host, strconv.Itoa(c.Port)) }
 
 // Config is the validated application configuration. It is immutable after
 // Load returns and must never be logged or printed (it contains secrets).
@@ -63,6 +78,7 @@ type Config struct {
 	App  AppConfig
 	DB   DBConfig
 	Auth AuthConfig
+	SMTP SMTPConfig
 }
 
 // DSN builds the PostgreSQL connection URL for pgxpool. Userinfo, host, path
@@ -84,31 +100,36 @@ func (c DBConfig) DSN() string {
 	return u.String()
 }
 
-// Load reads configuration from the real process environment, seeded from an
-// optional .env file in the current working directory. A missing .env is
-// allowed; a malformed or unreadable .env is an error. Environment variables
-// take precedence over .env values. On validation failure the returned error
-// lists every offending variable name with a safe explanation, never values.
+// Load reads the full application configuration from the real process
+// environment, seeded from an optional .env file in the current working
+// directory. A missing .env is allowed; a malformed or unreadable .env is an
+// error. Environment variables take precedence over .env values. On validation
+// failure the returned error lists every offending variable name with a safe
+// explanation, never values.
 func Load() (*Config, error) {
 	return load(os.LookupEnv, ".env")
 }
 
-// load is the isolated core. It accepts an environment lookup function and a
-// dotenv path so tests can run without touching the process environment or
-// working directory. The dotenv file is parsed with godotenv.Read, which does
-// not modify the process environment; precedence is applied here explicitly.
-func load(lookup func(string) (string, bool), dotenvPath string) (*Config, error) {
+// LoadDB reads ONLY the database configuration (environment over optional
+// .env). It is used by cmd/migrate, which needs database settings but must not
+// require application secrets such as AUTH_ACCESS_SECRET or SMTP credentials.
+func LoadDB() (DBConfig, error) {
+	return loadDB(os.LookupEnv, ".env")
+}
+
+// newLoader reads the optional dotenv file and builds a loader applying
+// env-over-file precedence. godotenv.Read does not modify the process
+// environment. A malformed/unreadable file is a secret-safe error (parser
+// messages may echo file content, so the underlying error is never wrapped).
+func newLoader(lookup func(string) (string, bool), dotenvPath string) (*loader, error) {
 	var fileVals map[string]string
 	if dotenvPath != "" {
 		var err error
 		fileVals, err = godotenv.Read(dotenvPath)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			// Do not wrap the underlying error: parser messages may echo
-			// file content, which can contain secrets.
 			return nil, fmt.Errorf("config: dotenv file %q is malformed or unreadable", dotenvPath)
 		}
 	}
-
 	get := func(key string) (string, bool) {
 		if v, ok := lookup(key); ok {
 			return v, true // environment wins, even if explicitly empty
@@ -116,8 +137,54 @@ func load(lookup func(string) (string, bool), dotenvPath string) (*Config, error
 		v, ok := fileVals[key]
 		return v, ok
 	}
+	return &loader{get: get}, nil
+}
 
-	l := &loader{get: get}
+// loadDBFields loads and validates the database settings onto l. Shared by the
+// full loader and the DB-only loader so the rules stay identical.
+func loadDBFields(l *loader) DBConfig {
+	var db DBConfig
+	db.Host = l.nonBlank("DB_HOST", "127.0.0.1", false)
+	dbPort, _ := l.integer("DB_PORT", 5432, 1, 65535)
+	db.Port = int(dbPort)
+	db.Name = l.nonBlank("DB_NAME", "", true)
+	db.User = l.nonBlank("DB_USER", "", true)
+	db.Password = l.str("DB_PASSWORD", "", true)
+	db.SSLMode = l.enum("DB_SSLMODE", "", true,
+		"disable", "allow", "prefer", "require", "verify-ca", "verify-full")
+
+	maxConns, maxOK := l.integer("DB_MAX_CONNS", 10, 1, math.MaxInt32)
+	minConns, minOK := l.integer("DB_MIN_CONNS", 0, 0, math.MaxInt32)
+	db.MaxConns = int32(maxConns)
+	db.MinConns = int32(minConns)
+	if maxOK && minOK && minConns > maxConns {
+		l.fail("DB_MIN_CONNS", "must be less than or equal to DB_MAX_CONNS")
+	}
+	db.MaxConnLifetime, _ = l.duration("DB_MAX_CONN_LIFETIME", 30*time.Minute)
+	return db
+}
+
+// loadDB is the isolated DB-only core (injectable lookup/dotenv for tests).
+func loadDB(lookup func(string) (string, bool), dotenvPath string) (DBConfig, error) {
+	l, err := newLoader(lookup, dotenvPath)
+	if err != nil {
+		return DBConfig{}, err
+	}
+	db := loadDBFields(l)
+	if len(l.errs) > 0 {
+		return DBConfig{}, errors.Join(l.errs...)
+	}
+	return db, nil
+}
+
+// load is the isolated full-configuration core. It accepts an environment
+// lookup function and a dotenv path so tests can run without touching the
+// process environment or working directory.
+func load(lookup func(string) (string, bool), dotenvPath string) (*Config, error) {
+	l, err := newLoader(lookup, dotenvPath)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{}
 
 	cfg.App.Env = l.enum("APP_ENV", "development", false, "development", "staging", "production")
@@ -127,23 +194,7 @@ func load(lookup func(string) (string, bool), dotenvPath string) (*Config, error
 	cfg.App.HTTPWriteTimeout, _ = l.duration("HTTP_WRITE_TIMEOUT", 10*time.Second)
 	cfg.App.HTTPIdleTimeout, _ = l.duration("HTTP_IDLE_TIMEOUT", 60*time.Second)
 
-	cfg.DB.Host = l.nonBlank("DB_HOST", "127.0.0.1", false)
-	dbPort, _ := l.integer("DB_PORT", 5432, 1, 65535)
-	cfg.DB.Port = int(dbPort)
-	cfg.DB.Name = l.nonBlank("DB_NAME", "", true)
-	cfg.DB.User = l.nonBlank("DB_USER", "", true)
-	cfg.DB.Password = l.str("DB_PASSWORD", "", true)
-	cfg.DB.SSLMode = l.enum("DB_SSLMODE", "", true,
-		"disable", "allow", "prefer", "require", "verify-ca", "verify-full")
-
-	maxConns, maxOK := l.integer("DB_MAX_CONNS", 10, 1, math.MaxInt32)
-	minConns, minOK := l.integer("DB_MIN_CONNS", 0, 0, math.MaxInt32)
-	cfg.DB.MaxConns = int32(maxConns)
-	cfg.DB.MinConns = int32(minConns)
-	if maxOK && minOK && minConns > maxConns {
-		l.fail("DB_MIN_CONNS", "must be less than or equal to DB_MAX_CONNS")
-	}
-	cfg.DB.MaxConnLifetime, _ = l.duration("DB_MAX_CONN_LIFETIME", 30*time.Minute)
+	cfg.DB = loadDBFields(l)
 
 	// Authentication. The secret is preserved exactly as supplied (never
 	// trimmed) and only its byte length is validated — the value must never
@@ -156,6 +207,39 @@ func load(lookup func(string) (string, bool), dotenvPath string) (*Config, error
 	cfg.Auth.RefreshTTL, _ = l.duration("AUTH_REFRESH_TTL", 720*time.Hour)
 	cfg.Auth.RateLimitInterval, _ = l.duration("AUTH_RATE_LIMIT_INTERVAL", time.Second)
 	cfg.Auth.CleanupInterval, _ = l.duration("AUTH_CLEANUP_INTERVAL", time.Hour)
+	cfg.Auth.ResetTTL, _ = l.duration("AUTH_RESET_TTL", 15*time.Minute)
+	cfg.Auth.ResetBaseURL = l.str("PASSWORD_RESET_BASE_URL", "", true)
+	if cfg.Auth.ResetBaseURL != "" {
+		u, err := url.Parse(cfg.Auth.ResetBaseURL)
+		// S-06: the reset page URL must be a clean absolute http(s) URL — no
+		// query, fragment, or opaque part (the emailed code is never URL-borne).
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+			u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.User != nil {
+			l.fail("PASSWORD_RESET_BASE_URL", "must be an absolute http or https URL without query, fragment, or userinfo")
+		}
+	}
+
+	// Outbound SMTP for password-reset email. Host and sender are required;
+	// username/password are an optional pair (authentication only when the
+	// username is set). The password is a secret: name-only errors, never logged.
+	cfg.SMTP.Host = l.nonBlank("SMTP_HOST", "", true)
+	smtpPort, _ := l.integer("SMTP_PORT", 587, 1, 65535)
+	cfg.SMTP.Port = int(smtpPort)
+	cfg.SMTP.From = l.nonBlank("SMTP_FROM", "", true)
+	if cfg.SMTP.From != "" && !strings.Contains(cfg.SMTP.From, "@") {
+		l.fail("SMTP_FROM", "must be a valid sender email address")
+	}
+	cfg.SMTP.Username = l.str("SMTP_USERNAME", "", false)
+	cfg.SMTP.Password = l.str("SMTP_PASSWORD", "", false)
+	if cfg.SMTP.Username != "" && cfg.SMTP.Password == "" {
+		l.fail("SMTP_PASSWORD", "required when SMTP_USERNAME is set")
+	}
+	if cfg.SMTP.Username == "" && cfg.SMTP.Password != "" {
+		l.fail("SMTP_USERNAME", "required when SMTP_PASSWORD is set")
+	}
+	// S-01: secure by default — require TLS. Set false only for a local dev
+	// SMTP server (e.g. MailHog); remote servers always fail closed without TLS.
+	cfg.SMTP.RequireTLS = l.boolean("SMTP_REQUIRE_TLS", true)
 
 	if len(l.errs) > 0 {
 		return nil, errors.Join(l.errs...)
@@ -255,4 +339,24 @@ func (l *loader) duration(key string, def time.Duration) (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+// boolean parses a true/false value (strconv.ParseBool accepts 1/0/t/f/true/
+// false etc.). Missing uses the default; an explicit empty or unparseable value
+// is a name-only error.
+func (l *loader) boolean(key string, def bool) bool {
+	v, ok := l.get(key)
+	if !ok {
+		return def
+	}
+	if v == "" {
+		l.fail(key, "must be a non-empty boolean")
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		l.fail(key, "must be a boolean (true or false)")
+		return def
+	}
+	return b
 }

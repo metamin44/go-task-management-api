@@ -40,6 +40,12 @@ type UserAPI interface {
 	DeleteAccount(ctx context.Context, userID domain.UUID) error
 }
 
+// PasswordResetAPI covers the public forgot/reset password flow.
+type PasswordResetAPI interface {
+	ForgotPassword(ctx context.Context, email string) error
+	ResetPassword(ctx context.Context, token, newPassword string) error
+}
+
 type ProjectAPI interface {
 	Create(ctx context.Context, actorID domain.UUID, name string, description *string) (*domain.Project, error)
 	Get(ctx context.Context, actorID, projectID domain.UUID) (*domain.Project, error)
@@ -66,16 +72,18 @@ type TaskAPI interface {
 }
 
 var (
-	_ AuthAPI    = (*service.AuthService)(nil)
-	_ UserAPI    = (*service.UserService)(nil)
-	_ ProjectAPI = (*service.ProjectService)(nil)
-	_ MemberAPI  = (*service.MemberService)(nil)
-	_ TaskAPI    = (*service.TaskService)(nil)
+	_ AuthAPI          = (*service.AuthService)(nil)
+	_ PasswordResetAPI = (*service.PasswordResetService)(nil)
+	_ UserAPI          = (*service.UserService)(nil)
+	_ ProjectAPI       = (*service.ProjectService)(nil)
+	_ MemberAPI        = (*service.MemberService)(nil)
+	_ TaskAPI          = (*service.TaskService)(nil)
 )
 
 // API bundles the service dependencies for all HTTP handlers.
 type API struct {
 	auth        AuthAPI
+	reset       PasswordResetAPI
 	users       UserAPI
 	projects    ProjectAPI
 	members     MemberAPI
@@ -86,11 +94,11 @@ type API struct {
 
 // New wires the API. Any nil dependency is a programming error and panics
 // immediately at composition time (never at request time).
-func New(auth AuthAPI, users UserAPI, projects ProjectAPI, members MemberAPI, tasks TaskAPI) *API {
-	if auth == nil || users == nil || projects == nil || members == nil || tasks == nil {
+func New(auth AuthAPI, reset PasswordResetAPI, users UserAPI, projects ProjectAPI, members MemberAPI, tasks TaskAPI) *API {
+	if auth == nil || reset == nil || users == nil || projects == nil || members == nil || tasks == nil {
 		panic("handler: nil service dependency")
 	}
-	return &API{auth: auth, users: users, projects: projects, members: members, tasks: tasks}
+	return &API{auth: auth, reset: reset, users: users, projects: projects, members: members, tasks: tasks}
 }
 
 // Options and RegisterRoutes live in router.go (route registration and

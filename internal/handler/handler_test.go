@@ -91,6 +91,25 @@ func (s *stubAuth) ValidateAccessToken(token string, now time.Time) (*service.To
 	return nil, service.ErrUnauthorized
 }
 
+type stubReset struct {
+	forgotFn func(context.Context, string) error
+	resetFn  func(context.Context, string, string) error
+}
+
+func (s *stubReset) ForgotPassword(ctx context.Context, email string) error {
+	if s.forgotFn != nil {
+		return s.forgotFn(ctx, email)
+	}
+	return errUnexpected
+}
+
+func (s *stubReset) ResetPassword(ctx context.Context, token, newPassword string) error {
+	if s.resetFn != nil {
+		return s.resetFn(ctx, token, newPassword)
+	}
+	return errUnexpected
+}
+
 type stubUsers struct {
 	profileFn       func(context.Context, domain.UUID) (*domain.User, error)
 	updateProfileFn func(context.Context, domain.UUID, *string, *string) (*domain.User, error)
@@ -260,6 +279,7 @@ type testEnv struct {
 	e        *echo.Echo
 	api      *API
 	auth     *stubAuth
+	reset    *stubReset
 	users    *stubUsers
 	projects *stubProjects
 	members  *stubMembers
@@ -271,6 +291,7 @@ func newTestEnv(t *testing.T, opts Options) *testEnv {
 	t.Helper()
 	env := &testEnv{
 		auth:     &stubAuth{},
+		reset:    &stubReset{},
 		users:    &stubUsers{},
 		projects: &stubProjects{},
 		members:  &stubMembers{},
@@ -282,7 +303,7 @@ func newTestEnv(t *testing.T, opts Options) *testEnv {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewJSONHandler(&env.logs, nil))
 	}
-	api := New(env.auth, env.users, env.projects, env.members, env.tasks)
+	api := New(env.auth, env.reset, env.users, env.projects, env.members, env.tasks)
 	env.api = api
 	env.e = echo.New()
 	api.RegisterRoutes(env.e, opts)

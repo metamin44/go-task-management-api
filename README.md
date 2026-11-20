@@ -22,20 +22,29 @@ Required secrets — generate locally, never commit, never print or log:
 - `DB_PASSWORD` — must equal the database container's `POSTGRES_PASSWORD`.
 - `AUTH_ACCESS_SECRET` — HS256 signing secret, **at least 32 bytes**, e.g.
   `openssl rand -base64 48`.
+- `SMTP_PASSWORD` — required only when `SMTP_USERNAME` is set (the two are an
+  optional pair: set both or neither).
 
 Other required variables (no defaults): `DB_NAME`, `DB_USER`, `DB_SSLMODE`
-(`disable` for the local container only; production must use `verify-full`).
+(`disable` for the local container only; production must use `verify-full`),
+`SMTP_HOST`, `SMTP_FROM` (sender address), and `PASSWORD_RESET_BASE_URL`
+(a clean absolute http(s) URL of the frontend reset page — no query string,
+fragment, or userinfo; the reset code is emailed in the message body, never
+appended to the URL).
 Defaults: `HTTP_PORT=8080`, timeouts `5s/10s/60s`, pool `10/0/30m`,
 `AUTH_ACCESS_TTL=15m`, `AUTH_REFRESH_TTL=720h`, `AUTH_RATE_LIMIT_INTERVAL=1s`,
-`AUTH_CLEANUP_INTERVAL=1h`.
+`AUTH_CLEANUP_INTERVAL=1h`, `AUTH_RESET_TTL=15m`, `SMTP_PORT=587`,
+`SMTP_REQUIRE_TLS=true`.
 Invalid configuration fails startup with variable names and safe explanations only.
+`cmd/migrate` loads **database settings only** (`config.LoadDB`), so migrations
+never require `AUTH_ACCESS_SECRET` or SMTP credentials.
 
 ## Security behavior
 
-- **Auth rate limiting:** `register`, `login`, `refresh`, and `change-password` are
-  rate-limited per client IP (token bucket: burst 5, then one request per
-  `AUTH_RATE_LIMIT_INTERVAL`). All four endpoints **share one bucket per IP**. Excess
-  requests get `429` with a `Retry-After` header. The limiter uses the connection peer
+- **Auth rate limiting:** `register`, `login`, `refresh`, `change-password`, and
+  `forgot-password` are rate-limited per client IP (token bucket: burst 5, then one
+  request per `AUTH_RATE_LIMIT_INTERVAL`). All five endpoints **share one bucket per IP**.
+  Excess requests get `429` with a `Retry-After` header. The limiter uses the connection peer
   address and ignores forwarding headers; memory is bounded with bounded-cost sampled
   eviction. Limits are **per instance** — multi-replica deployments should also enforce
   limits at the reverse proxy / shared gateway.
@@ -48,6 +57,24 @@ Invalid configuration fails startup with variable names and safe explanations on
 - **Login timing equalization:** an unknown email performs one Argon2id verification
   against a once-generated dummy hash, so it costs the same as a wrong password and
   returns the identical `401`. This prevents user enumeration via response timing.
+- **Password reset:** `POST /api/v1/auth/forgot-password` always returns the same generic
+  `202` acknowledgement whether or not the email is registered (no account enumeration).
+  The synchronous request path performs **identical work** for known and unknown emails —
+  a single user lookup, no DB writes — so write/SMTP latency cannot reveal existence. Token
+  issuance and delivery run in a **bounded, panic-recovered async workflow** (at most 32
+  concurrent deliveries; over-capacity requests are dropped with a secret-safe warning and
+  still return the generic `202`). A cryptographically random single-use token is stored
+  **only as its SHA-256 hash** with a 15-minute default TTL (`AUTH_RESET_TTL`); the raw value
+  is delivered as a **copy/paste code in the email body**, never embedded in a URL, so it
+  cannot leak through browser history or `Referer` headers. The frontend posts that code to
+  `POST /api/v1/auth/reset-password`, which consumes it, stores a new Argon2id hash, and
+  revokes **all** refresh sessions in one transaction; a `FOR UPDATE` row lock guarantees
+  exactly one winner under concurrent attempts. Unknown, expired, and already-used codes all
+  return the identical `401`. A new request supersedes any previous unconsumed code. SMTP
+  delivery uses stdlib `net/smtp` and **requires TLS** (`SMTP_REQUIRE_TLS`, default `true`):
+  STARTTLS is used when offered, and a server without STARTTLS **fails closed** unless it is
+  a local dev host with the requirement explicitly disabled. Credentials, codes, page URLs,
+  and recipient addresses are never logged.
 - **Refresh-session cleanup:** a background worker drains expired/revoked rows older
   than the 30-day retention window in bounded 500-row batches on a configurable tick
   (`AUTH_CLEANUP_INTERVAL`, default 1h). Passes never overlap within an instance;

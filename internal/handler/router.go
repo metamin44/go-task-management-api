@@ -62,6 +62,8 @@ func (a *API) RegisterRoutes(e *echo.Echo, opts Options) {
 	auth.POST("/login", a.limitAuth(a.login))
 	auth.POST("/refresh", a.limitAuth(a.refresh))
 	auth.POST("/logout", a.logout)
+	auth.POST("/forgot-password", a.limitAuth(a.forgotPassword))
+	auth.POST("/reset-password", a.resetPassword)
 
 	// Everything below requires a valid access token; the actor identity is
 	// loaded server-side and never taken from the request payload.

@@ -2,12 +2,14 @@
 
 > Canonical context for future Qoder tasks. Captures finalized design decisions and the
 > current implementation state. All application layers are implemented (domain, repository,
-> service, handler) plus the composition root (`cmd/api`), and **migrations HAVE been applied**
-> to PostgreSQL (`schema_migrations` version=5, dirty=false). Remaining work: deployment
-> hardening (the scheduled cleanup job is now wired). Integration tests T1–T7 are implemented
-> (Testcontainers, `integration` build tag). Per-IP authentication rate limiting and
-> optimistic concurrency (`updated_at` version predicate) on user/project/task updates
-> are implemented. Sections marked *pending* are
+> service, handler) plus the composition root (`cmd/api`). Migrations 000001–000005 **HAVE been
+> applied** to PostgreSQL (`schema_migrations` version=5, dirty=false); migration **000006
+> (`password_reset_tokens`) is added but NOT yet applied** to the development database (apply
+> with `cmd/migrate` when approved). Remaining work: deployment hardening (the scheduled
+> cleanup job is now wired). Integration tests T1–T8 are implemented (Testcontainers,
+> `integration` build tag). Per-IP authentication rate limiting, optimistic concurrency
+> (`updated_at` version predicate) on user/project/task updates, and the forgot/reset
+> password flow (§13) are implemented. Sections marked *pending* are
 > future work, not completed features.
 > Never read, print, copy, or commit the secret value in `.env`.
 
@@ -28,6 +30,8 @@ MVP scope (from finalized requirements; implemented unless marked pending):
 - Scheduled cleanup of expired/revoked refresh token records (30-day retention) —
   **implemented** (`service.CleanupWorker`, configurable `AUTH_CLEANUP_INTERVAL`, default 1h;
   bounded 500-row batches via `DeleteExpiredBatch`, no overlapping passes; see §12).
+- Forgot/reset password via emailed single-use token — **implemented**
+  (`service.PasswordResetService`, SMTP mailer, `password_reset_tokens` table; see §13).
 
 ## 2. Confirmed technology stack
 
@@ -100,6 +104,8 @@ record returns 404.
 - `POST /api/v1/auth/refresh` — rotate refresh token (row-locked, reuse-detecting; workflow in §7).
 - `POST /api/v1/auth/logout` — revoke the current session's active refresh token.
 - `POST /api/v1/auth/logout-all` — revoke all active refresh sessions of the user.
+- `POST /api/v1/auth/forgot-password` — request a reset code (emailed in the body, never in a URL); always the same generic `202` (enumeration-safe, equal synchronous work); rate-limited per IP.
+- `POST /api/v1/auth/reset-password` — consume the single-use emailed reset code, set a new password, revoke all sessions; `204`.
 
 ### Users
 
@@ -149,9 +155,11 @@ task `description:null` is rejected (service patch cannot NULL it — known limi
 
 ## 5. Finalized database schema (PostgreSQL 17)
 
-Five tables. The DDL below is **verbatim from the `migrations/000001`–`000005` up files**
+Six tables. The DDL below is **verbatim from the `migrations/000001`–`000006` up files**
 (authoritative; constraint and index names aligned with the actual SQL).
-**Applied to the database** (`schema_migrations` version=5, dirty=false; verified read-only).
+000001–000005 are **applied to the database** (`schema_migrations` version=5, dirty=false;
+verified read-only). **000006 (`password_reset_tokens`) is added but NOT yet applied** to the
+development database — apply via `cmd/migrate` when approved.
 Whitespace checks use `~ '[^[:space:]]'` (rejects whitespace-only incl. tabs/newlines).
 
 ```sql
@@ -318,6 +326,32 @@ CREATE INDEX tasks_assignee_idx
 
 CREATE INDEX tasks_creator_idx
     ON tasks (created_by);
+
+-- migrations/000006_create_password_reset_tokens_table.up.sql  (NOT yet applied)
+CREATE TABLE password_reset_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    user_id UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+
+    token_hash BYTEA NOT NULL UNIQUE
+        CHECK (octet_length(token_hash) = 32),
+
+    expires_at TIMESTAMPTZ NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    consumed_at TIMESTAMPTZ NULL,
+
+    CONSTRAINT password_reset_tokens_expires_after_created
+        CHECK (expires_at > created_at)
+);
+
+CREATE INDEX password_reset_tokens_user_id_idx
+    ON password_reset_tokens (user_id);
+
+CREATE INDEX password_reset_tokens_expires_at_idx
+    ON password_reset_tokens (expires_at);
 ```
 
 Relationships: users 1—N refresh_sessions (cascade); users 1—N projects via `created_by`
@@ -340,6 +374,7 @@ attribution survives member removal); tasks assignee → project_members via **c
 | tasks.project_id → projects | CASCADE | |
 | tasks.created_by → users | RESTRICT | direct FK, not composite (decision) |
 | tasks.(project_id, assigned_to) → project_members | **NO ACTION** (not RESTRICT), MATCH SIMPLE | NULL assignee skips check; NO ACTION queues its check behind cascade events so project deletion with assigned tasks succeeds; standalone member removal with assigned tasks still fails (23503) |
+| password_reset_tokens.user_id → users | CASCADE | reset tokens vanish with the account (000006, not yet applied) |
 
 ### Key rules
 
@@ -458,7 +493,7 @@ are implicitly transactional — no `CREATE INDEX CONCURRENTLY` inside them.
 Testing: table-driven Go unit tests are **implemented and fully offline** (config, pool
 failure paths, domain validation, repository query building/error mapping, service
 policies/rotation/rollback/retries via in-memory fakes, real argon2id + JWT suites, HTTP
-handler/middleware tests with stub services). Integration tests T1–T7 are **implemented**
+handler/middleware tests with stub services). Integration tests T1–T8 are **implemented**
 in `internal/integration` under the `integration` build tag: Testcontainers
 (`testcontainers-go` v0.45.0 + postgres module) starts an isolated temporary
 `postgres:17-alpine` container, applies the embedded migrations through the real
@@ -468,7 +503,7 @@ never touches the development database/container/volume and never reads `.env`
 
 ```sh
 go test -count=1 ./...                                          # unit only, no Docker
-go test -count=1 -tags=integration ./internal/integration/...   # T1–T7, Docker required
+go test -count=1 -tags=integration ./internal/integration/...   # T1–T8, Docker required
 ```
 
 CI (`.github/workflows/ci.yml`, push to main + PRs): gofmt check, `go vet`, `go build`,
@@ -502,7 +537,9 @@ concurrent different-field updates without lost updates, strict `updated_at` adv
 incl. the `GREATEST` future-stamp branch); T6 → `t6_partial_merge_test.go` (R-01: partial
 user/project updates preserve the latest committed omitted field); T7 →
 `t7_timestamp_advance_test.go` (R-03: `UpdatePasswordHash`/`UnassignMemberTasks` advance
-`updated_at` past a future stamp). F-01 rate limiting is covered by offline
+`updated_at` past a future stamp); T8 → `t8_password_reset_test.go` (hash-only token storage,
+expiry, single-use reuse rejection, 12-goroutine concurrent single-winner, session revocation,
+and FK cascade on user delete). F-01 rate limiting is covered by offline
 limiter unit tests (burst/deny/recover with an injected clock, 200-goroutine concurrency,
 bounded-cost sampled eviction + capacity under a 500-IP concurrent flood) and handler
 tests (429 + `Retry-After`, spoofed `X-Forwarded-For`/`X-Real-IP` ignored, per-peer buckets,
@@ -526,14 +563,20 @@ regression assertions that user/project PATCH no longer pre-reads to merge omitt
 - `internal/config`: `Load()` with env-over-`.env` precedence, full validation,
   secret-safe errors, `DBConfig.DSN()`; **AuthConfig**: `AUTH_ACCESS_SECRET`
   (required, ≥32 bytes, preserved exactly), `AUTH_ACCESS_TTL` (default 15m),
-  `AUTH_REFRESH_TTL` (default 720h), `AUTH_RATE_LIMIT_INTERVAL` (default 1s). No
-  `String()`/logging helpers; unit-tested.
+  `AUTH_REFRESH_TTL` (default 720h), `AUTH_RATE_LIMIT_INTERVAL` (default 1s),
+  `AUTH_CLEANUP_INTERVAL` (default 1h), `AUTH_RESET_TTL` (default 15m),
+  `PASSWORD_RESET_BASE_URL` (required clean http(s) URL — no query/fragment/userinfo);
+  **SMTPConfig**: `SMTP_HOST`/`SMTP_FROM` (required), `SMTP_PORT` (default 587),
+  `SMTP_REQUIRE_TLS` (default true), optional `SMTP_USERNAME`/`SMTP_PASSWORD` pair.
+  **`LoadDB()`** loads database settings only (used by `cmd/migrate`; no app secrets required).
+  No `String()`/logging helpers; unit-tested.
 - `internal/database`: `NewPool(ctx, cfg)` — pgxpool bootstrap with Ping check and
   secret-safe errors; unit-tested (no live DB required).
 - `internal/migration`: `Run(cfg, migrationsFS)` — iofs + migrate `pgx5` driver,
   `ErrNoChange` = success, static secret-safe errors.
-- `migrations/`: five up+down pairs (000001–000005) + `embed.go`; **applied**
-  (version=5, dirty=false; tables/FKs/indexes verified read-only).
+- `migrations/`: six up+down pairs (000001–000006) + `embed.go`; 000001–000005 **applied**
+  (version=5, dirty=false; tables/FKs/indexes verified read-only). **000006
+  (`password_reset_tokens`) added but NOT applied** to the development database.
 - `internal/domain`: entities, enums, validation (DB-identical limits), UUID
   ([16]byte, pgx-native), error sentinels (incl. `ErrSerialization`), repository
   interfaces + `Transactor`; unit-tested.
@@ -548,6 +591,14 @@ regression assertions that user/project PATCH no longer pre-reads to merge omitt
   transfer, guarded removal, list), tasks (approved write policy); argon2id hasher;
   HS256 JWT manager; bounded 3-attempt serialization retries; ~90 offline tests
   incl. failure injection and rollback.
+- `internal/service` (password reset): `PasswordResetService` (forgot/reset) reusing the
+  argon2id hasher, `RevokeUserSessions`, `UpdatePasswordHash`, and the opaque-token crypto;
+  equal-work synchronous path + bounded, panic-recovered async delivery (S-02/S-04/S-07);
+  `ResetMailer` interface + stdlib `net/smtp` `SMTPMailer` (TLS fail-closed with local dev
+  exception, code-in-body not URL, optional auth, secret-safe static errors; S-01/S-05);
+  offline service/mailer tests (enumeration-safe generic response, hash-only storage,
+  expiry/reuse/weak-password/rollback, synchronous-no-writes, panic recovery, concurrency
+  bound, TLS decision matrix + fake-SMTP fail-closed).
 - `internal/handler`: all §4 endpoints; strict JSON DTOs (unknown fields rejected,
   1 MiB body cap), consistent error envelope, request ID, metadata-only structured
   logging, panic recovery (no stack/value leakage), JWT auth middleware loading
@@ -558,7 +609,8 @@ regression assertions that user/project PATCH no longer pre-reads to merge omitt
   transactor → services → JWT → handler → Echo; server timeouts from config;
   `/ready` pings the pool (3s bound); `/swagger/*` UI; SIGINT/SIGTERM graceful
   shutdown (10s bound) then pool close; migrations are a separate explicit step.
-- `cmd/migrate`: applies embedded migrations; secret-safe stderr errors.
+- `cmd/migrate`: applies embedded migrations via `config.LoadDB` (database settings only —
+  no `AUTH_ACCESS_SECRET`/SMTP required); secret-safe stderr errors.
 - `docs/`: generated OpenAPI spec (`swag init -g internal/handler/doc.go -o docs`).
 - `internal/integration/`: T1–T7 live-PostgreSQL suite (build tag `integration`),
   Testcontainers harness with real migration runner, per-test TRUNCATE isolation,
@@ -573,9 +625,18 @@ regression assertions that user/project PATCH no longer pre-reads to merge omitt
 
 **NOT implemented / NOT done:**
 
+- Migration **000006 (`password_reset_tokens`) is NOT applied** to the development database;
+  the forgot/reset endpoints require it (apply via `cmd/migrate` when approved). Integration
+  T8 applies it automatically to its isolated container.
+- **SMTP configuration is required at `cmd/api` startup** (`SMTP_HOST`, `SMTP_FROM`,
+  `PASSWORD_RESET_BASE_URL`; optional `SMTP_USERNAME`/`SMTP_PASSWORD` pair; `SMTP_REQUIRE_TLS`
+  defaults true). The local `.env` must add these before `cmd/api` will start; `.env.example`
+  documents them. `cmd/migrate` is exempt (DB-only config, S-03).
 - Docker image has not been built/run yet (files only; no Docker operations were
   performed against the development database).
 - CORS origins are unconfigured (same-origin only) — deliberate conservative default.
+- Expired `password_reset_tokens` rows are not yet swept by a scheduled job (the refresh-session
+  cleanup worker covers `refresh_sessions` only); add a bounded cleanup pass if retention matters.
 
 Environment (running, verified):
 
@@ -679,3 +740,113 @@ in the SQL.
   staticcheck still unusable locally (go1.24.3 vs go1.27.3); `-race` unavailable (no
   cgo/gcc). No schema/migration changes; no new dependencies; no commits/pushes;
   `.env` never read.
+
+## 13. Forgot / reset password (completed; migration 000006 pending application)
+
+- **Endpoints:** `POST /api/v1/auth/forgot-password` (public, rate-limited via the shared
+  per-IP bucket) and `POST /api/v1/auth/reset-password` (public). Swagger annotations added;
+  spec regenerated (`docs/`). Existing Change Password (`PATCH /users/me/password`) is unchanged.
+- **Schema (000006, up+down):** `password_reset_tokens(id, user_id FK→users CASCADE,
+  token_hash bytea(32) UNIQUE, expires_at, created_at, consumed_at)` + indexes on `user_id`
+  and `expires_at` + `CHECK (expires_at > created_at)`. Stores only the SHA-256 digest, user,
+  expiry, and consumption time. **Not applied** to the development database.
+- **Domain/repository:** `domain.PasswordResetToken` (+`IsConsumed`/`IsExpired`) and
+  `PasswordResetTokenRepository` (`Create`, `GetByTokenHashForUpdate` FOR UPDATE,
+  `MarkConsumed` WHERE consumed_at IS NULL, `DeleteUnconsumedByUser`); pgx implementation
+  reuses `mapError`/`requireRows`/ctx-tx conventions; parameterized SQL throughout.
+- **Service:** `PasswordResetService` (separate from `AuthService`; its constructor/tests are
+  untouched) reuses the Argon2id hasher, `RevokeUserSessions`, `UpdatePasswordHash`,
+  `withRetry`, and `newRefreshToken`/`hashRefreshToken` (no duplicated hashing/revocation).
+  `ForgotPassword`: the **synchronous path runs only `GetByEmail`** — identical work for known
+  and unknown emails, no DB writes (S-04). Unknown email → nil (generic, no workflow scheduled);
+  known email → acquire a delivery slot and schedule a **bounded, panic-recovered async
+  workflow** (`spawn` DI: production `go f()`, tests synchronous/capturing; `sem` cap
+  `resetDeliveryConcurrency=32`; `context.WithoutCancel` + 30s bound). The workflow does
+  tx{delete superseded unconsumed tokens + create hashed token (TTL `AUTH_RESET_TTL`, default
+  15m)} then emails the raw code; over-capacity requests are dropped with a secret-safe warning
+  (still generic `202`); delivery/issuance failures and panics are logged secret-safe (S-02/S-07).
+  `ResetPassword` (unchanged): one tx{FOR UPDATE lookup → reject unknown/expired/consumed with
+  identical `ErrUnauthorized` → validate + hash new password → `UpdatePasswordHash` →
+  `MarkConsumed` → `RevokeUserSessions`}; row lock serializes concurrent attempts (exactly one
+  winner); any failure rolls back atomically.
+- **Mailer:** small `ResetMailer` interface `SendPasswordReset(ctx, toEmail, resetPageURL,
+  resetCode)`; `SMTPMailer` uses stdlib `net/smtp` (no new dependency), ctx-bounded dial/I/O.
+  **TLS enforced (S-01):** STARTTLS when advertised (`tls.Config{ServerName, MinVersion:TLS12}`,
+  certificate verified); without STARTTLS the connection **fails closed** unless
+  `mustUseTLS(host, requireTLS)` is false — i.e. a local host (`localhost`/`127.0.0.1`/`::1`)
+  with `requireTLS=false` (dev exception). Optional PlainAuth; static secret-safe errors; never
+  logs credentials, recipient, page URL, or code. **S-05:** the code is delivered in the message
+  body (copy/paste); `resetPageURL` is the clean base URL with no token, avoiding browser-history
+  and `Referer` leakage. The frontend posts the code to the existing `reset-password` endpoint.
+- **Config:** `SMTP_HOST`/`SMTP_FROM`/`PASSWORD_RESET_BASE_URL` required; `SMTP_PORT` default
+  587; optional `SMTP_USERNAME`/`SMTP_PASSWORD` pair (both-or-neither); `AUTH_RESET_TTL` default
+  15m; **`SMTP_REQUIRE_TLS` default `true`** (S-01). **S-06:** `PASSWORD_RESET_BASE_URL` must be a
+  clean absolute http(s) URL — query, fragment, userinfo, and opaque parts are rejected.
+  **S-03:** `config.LoadDB()` loads database settings only (shared `newLoader`/`loadDBFields`),
+  so `cmd/migrate` needs no `AUTH_ACCESS_SECRET`/SMTP config; the compose `migrate` service is
+  DB-only. Fail-fast name-only errors. `.env.example` updated.
+- **Security:** enumeration-safe identical `202` with equal synchronous work (S-04); hash-only
+  storage; single-use + 15m expiry; atomic password-change + consumption + session revocation;
+  concurrent single-winner; forgot-password rate-limited; TLS fail-closed (S-01); panic-recovered
+  bounded async delivery (S-02/S-07); code-in-body token transfer (S-05); clean-URL validation
+  (S-06); DB-only migration config (S-03); no secret/code/URL/recipient logging.
+- **Tests (offline, all PASS):** service `TestForgotPassword{KnownEmail,UnknownEmail,
+  SynchronousPathDoesNoWrites,DeliveryPanicRecovered,DeliveryConcurrencyBounded,
+  SupersedesPreviousCode,MailerFailureIsLoggedSafely}`, `TestResetPassword{Success,UnknownToken,
+  ExpiredToken,ReusedToken,WeakPassword,RollbackOnRevocationFailure}`,
+  `TestResetTokenHashOnlyStorage`; mailer `TestResetMessageFormat`,
+  `TestSMTPMailerDialFailureSecretSafe`, `TestIsLocalSMTPHost`, `TestMustUseTLS`,
+  `TestSMTPMailerFailsClosedWithoutSTARTTLS` (in-process fake SMTP: remote fail-closed, local
+  requireTLS fail-closed, local dev plaintext exception); config `TestLoadSMTPRequireTLS`,
+  `TestLoadDBOnly`, base-URL query/fragment/userinfo/opaque rejection in
+  `TestLoadResetConfigInvalid`; handler `TestForgotPassword{GenericResponse,Validation,
+  RateLimited}`, `TestResetPassword{Success,Unauthorized,Validation}`; repository offline SQL
+  tests `TestPasswordReset{CreateSQL,GetForUpdateSQL,MarkConsumedSQL,DeleteUnconsumedByUserSQL}`.
+  Integration **T8** (`t8_password_reset_test.go`, build tag `integration`): hash-only storage +
+  mailed **code** with clean page URL, unknown-email no-op, success + session revocation +
+  new-password login, expired/reused/unknown rejection, 12-goroutine concurrent single-winner,
+  FK cascade.
+- **Verification:** `gofmt -l .` clean; `go test -count=1 ./...` all packages pass; `go vet ./...`,
+  `go build ./...`, `go vet -tags=integration ./...` clean (T8 compiles). Integration suite **not
+  executed** this round (no Docker/migrations without approval); T8 applies 000006 to its isolated
+  container when run. No new dependencies (go.mod/go.sum unchanged); no commits/pushes; `.env`
+  never read.
+
+## 14. Password-reset security hardening S-01…S-07 (completed)
+
+Applied the focused security-review findings to the forgot/reset feature without changing
+Change Password, the layered architecture, or the atomic reset/revocation transaction. No ORM,
+no new dependencies.
+
+- **S-01 — SMTP TLS fail-closed.** `SMTPConfig.RequireTLS` (`SMTP_REQUIRE_TLS`, default true);
+  `SMTPMailer` uses STARTTLS when offered and otherwise refuses unless the host is local AND the
+  requirement is disabled (`isLocalSMTPHost`/`mustUseTLS`). Files: `internal/config/config.go`,
+  `internal/service/mailer.go`, `cmd/api/main.go`, `.env.example`, compose. Tests:
+  `TestMustUseTLS`, `TestIsLocalSMTPHost`, `TestSMTPMailerFailsClosedWithoutSTARTTLS`,
+  `TestLoadSMTPRequireTLS`.
+- **S-02 — panic recovery, secret-safe logs.** The async delivery closure recovers panics and
+  logs a static message (never the panic value, code, URL, or recipient). File:
+  `internal/service/password_reset.go`. Test: `TestForgotPasswordDeliveryPanicRecovered`.
+- **S-03 — DB-only migration config.** `config.LoadDB()` (shared `newLoader`/`loadDBFields`);
+  `cmd/migrate` uses it; compose `migrate` service carries DB env only. Files:
+  `internal/config/config.go`, `cmd/migrate/main.go`, `docker-compose.yml`. Test: `TestLoadDBOnly`.
+- **S-04 — equal synchronous work.** Only `GetByEmail` runs synchronously; issuance + delivery
+  are fully async, so known/unknown emails do identical request-path work (no write/SMTP timing
+  oracle). File: `internal/service/password_reset.go`. Test:
+  `TestForgotPasswordSynchronousPathDoesNoWrites` (asserts no synchronous write ops).
+- **S-05 — safe token transfer.** The reset code travels in the email body, never in a URL; the
+  page URL is the clean base. The existing `POST reset-password` is the frontend-to-API exchange
+  (no fragment-only shortcut). Files: `internal/service/mailer.go`, `internal/service/
+  password_reset.go`, handler annotations. Tests: `TestResetMessageFormat`,
+  `TestForgotPasswordKnownEmail`, T8 `TestResetForgotStoresHashOnlyAndMailsCode`.
+- **S-06 — base-URL validation.** `PASSWORD_RESET_BASE_URL` rejects query, fragment, userinfo,
+  opaque, non-http(s), and hostless URLs. File: `internal/config/config.go`. Test:
+  `TestLoadResetConfigInvalid` (added cases).
+- **S-07 — bounded async delivery.** A non-blocking semaphore (`resetDeliveryConcurrency=32`)
+  is acquired before spawning; over-capacity requests drop with a warning and slots are reusable
+  after drain. File: `internal/service/password_reset.go`. Test:
+  `TestForgotPasswordDeliveryConcurrencyBounded`.
+- **Verification:** gofmt clean; `go test -count=1 ./...`, `go vet ./...`, `go build ./...`,
+  `go vet -tags=integration ./...` all pass. Integration suite not executed (no Docker approval);
+  migration 000006 still pending application to the development database. No commits/pushes;
+  `.env` never read or printed.

@@ -22,6 +22,8 @@ func TestRouteTable(t *testing.T) {
 		"POST /api/v1/auth/refresh",
 		"POST /api/v1/auth/logout",
 		"POST /api/v1/auth/logout-all",
+		"POST /api/v1/auth/forgot-password",
+		"POST /api/v1/auth/reset-password",
 		"GET /api/v1/users/me",
 		"PATCH /api/v1/users/me",
 		"DELETE /api/v1/users/me",
@@ -97,6 +99,8 @@ func TestPublicVsAuthenticatedRoutes(t *testing.T) {
 		{http.MethodPost, "/api/v1/auth/login"},
 		{http.MethodPost, "/api/v1/auth/refresh"},
 		{http.MethodPost, "/api/v1/auth/logout"},
+		{http.MethodPost, "/api/v1/auth/forgot-password"},
+		{http.MethodPost, "/api/v1/auth/reset-password"},
 		{http.MethodGet, "/health"},
 	}
 	for _, rt := range public {

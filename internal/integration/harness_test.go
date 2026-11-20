@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,11 +99,14 @@ type fixture struct {
 	pool       *pgxpool.Pool
 	users      *repository.UserRepository
 	sessions   *repository.RefreshSessionRepository
+	resets     *repository.PasswordResetTokenRepository
 	projects   *repository.ProjectRepository
 	members    *repository.ProjectMemberRepository
 	tasks      *repository.TaskRepository
 	tx         *repository.Transactor
 	auth       *service.AuthService
+	resetSvc   *service.PasswordResetService
+	mailer     *captureMailer
 	userSvc    *service.UserService
 	projectSvc *service.ProjectService
 	memberSvc  *service.MemberService
@@ -115,13 +119,14 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := testPool.Exec(ctx,
-		"TRUNCATE TABLE users, refresh_sessions, projects, project_members, tasks CASCADE"); err != nil {
+		"TRUNCATE TABLE users, refresh_sessions, password_reset_tokens, projects, project_members, tasks CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	f := &fixture{
 		pool:     testPool,
 		users:    repository.NewUserRepository(testPool),
 		sessions: repository.NewRefreshSessionRepository(testPool),
+		resets:   repository.NewPasswordResetTokenRepository(testPool),
 		projects: repository.NewProjectRepository(testPool),
 		members:  repository.NewProjectMemberRepository(testPool),
 		tasks:    repository.NewTaskRepository(testPool),
@@ -131,7 +136,13 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.auth, err = service.NewAuthService(f.users, f.sessions, f.tx, service.NewArgon2idHasher(), tokens, 720*time.Hour)
+	hasher := service.NewArgon2idHasher()
+	f.auth, err = service.NewAuthService(f.users, f.sessions, f.tx, hasher, tokens, 720*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mailer = newCaptureMailer()
+	f.resetSvc, err = service.NewPasswordResetService(f.users, f.resets, f.sessions, f.tx, hasher, f.mailer, 15*time.Minute, "https://app.example.com/reset", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +151,46 @@ func newFixture(t *testing.T) *fixture {
 	f.memberSvc = service.NewMemberService(f.projects, f.members, f.users, f.tasks, f.tx)
 	f.taskSvc = service.NewTaskService(f.tasks, f.members)
 	return f
+}
+
+// captureMailer records reset deliveries from the asynchronous send so tests
+// can extract the raw code deterministically (no sleeps). The page URL and code
+// are captured separately: the code travels in the email body, never in a URL
+// (S-05).
+type captureMailer struct {
+	mu    sync.Mutex
+	calls []resetCall
+	ch    chan resetCall
+}
+
+type resetCall struct{ to, pageURL, code string }
+
+func newCaptureMailer() *captureMailer { return &captureMailer{ch: make(chan resetCall, 16)} }
+
+func (m *captureMailer) SendPasswordReset(ctx context.Context, to, pageURL, code string) error {
+	c := resetCall{to, pageURL, code}
+	m.mu.Lock()
+	m.calls = append(m.calls, c)
+	m.mu.Unlock()
+	m.ch <- c
+	return nil
+}
+
+// next waits for the next delivery and returns the raw reset code.
+func (m *captureMailer) next(t *testing.T) string {
+	t.Helper()
+	return m.nextCall(t).code
+}
+
+func (m *captureMailer) nextCall(t *testing.T) resetCall {
+	t.Helper()
+	select {
+	case c := <-m.ch:
+		return c
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reset email captured")
+		return resetCall{}
+	}
 }
 
 // ---- helpers ----

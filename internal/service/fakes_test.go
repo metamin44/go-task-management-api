@@ -19,6 +19,7 @@ import (
 type fakeDB struct {
 	users    map[domain.UUID]domain.User
 	sessions map[domain.UUID]domain.RefreshSession
+	resets   map[domain.UUID]domain.PasswordResetToken
 	projects map[domain.UUID]domain.Project
 	members  map[[2]domain.UUID]domain.ProjectMember
 	tasks    map[domain.UUID]domain.Task
@@ -28,6 +29,7 @@ func newFakeDB() *fakeDB {
 	return &fakeDB{
 		users:    map[domain.UUID]domain.User{},
 		sessions: map[domain.UUID]domain.RefreshSession{},
+		resets:   map[domain.UUID]domain.PasswordResetToken{},
 		projects: map[domain.UUID]domain.Project{},
 		members:  map[[2]domain.UUID]domain.ProjectMember{},
 		tasks:    map[domain.UUID]domain.Task{},
@@ -41,6 +43,9 @@ func (db *fakeDB) clone() *fakeDB {
 	}
 	for k, v := range db.sessions {
 		c.sessions[k] = v
+	}
+	for k, v := range db.resets {
+		c.resets[k] = v
 	}
 	for k, v := range db.projects {
 		c.projects[k] = v
@@ -218,6 +223,11 @@ func (r *fakeUserRepo) Delete(ctx context.Context, id domain.UUID) error {
 			delete(r.e.db.sessions, sid)
 		}
 	}
+	for rid, rt := range r.e.db.resets {
+		if rt.UserID == id {
+			delete(r.e.db.resets, rid)
+		}
+	}
 	return nil
 }
 
@@ -314,6 +324,61 @@ func (r *fakeSessionRepo) DeleteExpiredBatch(ctx context.Context, retention time
 		if (s.RevokedAt != nil && s.RevokedAt.Before(cutoff)) ||
 			(s.RevokedAt == nil && s.ExpiresAt.Before(cutoff)) {
 			delete(r.e.db.sessions, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// ---- password reset tokens ----
+
+type fakeResetRepo struct{ e *fakeEnv }
+
+var _ domain.PasswordResetTokenRepository = (*fakeResetRepo)(nil)
+
+func (r *fakeResetRepo) Create(ctx context.Context, t *domain.PasswordResetToken) error {
+	r.e.op("resets.Create")
+	for _, e := range r.e.db.resets {
+		if bytes.Equal(e.TokenHash, t.TokenHash) {
+			return fmt.Errorf("resets: create: %w (constraint password_reset_tokens_token_hash_key)", domain.ErrConflict)
+		}
+	}
+	cp := *t
+	cp.CreatedAt = time.Now()
+	r.e.db.resets[t.ID] = cp
+	t.CreatedAt = cp.CreatedAt
+	return nil
+}
+
+func (r *fakeResetRepo) GetByTokenHashForUpdate(ctx context.Context, hash []byte) (*domain.PasswordResetToken, error) {
+	r.e.op("resets.GetByTokenHashForUpdate")
+	for _, t := range r.e.db.resets {
+		if bytes.Equal(t.TokenHash, hash) {
+			cp := t
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("resets: get: %w", domain.ErrNotFound)
+}
+
+func (r *fakeResetRepo) MarkConsumed(ctx context.Context, id domain.UUID) error {
+	r.e.op("resets.MarkConsumed")
+	t, ok := r.e.db.resets[id]
+	if !ok || t.ConsumedAt != nil {
+		return fmt.Errorf("resets: mark consumed: %w", domain.ErrNotFound)
+	}
+	now := time.Now()
+	t.ConsumedAt = &now
+	r.e.db.resets[id] = t
+	return nil
+}
+
+func (r *fakeResetRepo) DeleteUnconsumedByUser(ctx context.Context, userID domain.UUID) (int64, error) {
+	r.e.op("resets.DeleteUnconsumedByUser")
+	var n int64
+	for id, t := range r.e.db.resets {
+		if t.UserID == userID && t.ConsumedAt == nil {
+			delete(r.e.db.resets, id)
 			n++
 		}
 	}
@@ -640,6 +705,7 @@ type fakeStore struct {
 	*fakeEnv
 	users    fakeUserRepo
 	sessions fakeSessionRepo
+	resets   fakeResetRepo
 	projects fakeProjectRepo
 	members  fakeMemberRepo
 	tasks    fakeTaskRepo
@@ -651,6 +717,7 @@ func newFakeStore() *fakeStore {
 		fakeEnv:  e,
 		users:    fakeUserRepo{e},
 		sessions: fakeSessionRepo{e},
+		resets:   fakeResetRepo{e},
 		projects: fakeProjectRepo{e},
 		members:  fakeMemberRepo{e},
 		tasks:    fakeTaskRepo{e},

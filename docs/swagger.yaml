@@ -50,6 +50,11 @@ definitions:
       request_id:
         type: string
     type: object
+  handler.forgotPasswordRequest:
+    properties:
+      email:
+        type: string
+    type: object
   handler.listResponse:
     properties:
       data: {}
@@ -81,6 +86,11 @@ definitions:
       user_id:
         type: string
     type: object
+  handler.messageResponse:
+    properties:
+      message:
+        type: string
+    type: object
   handler.projectResponse:
     properties:
       created_at:
@@ -108,6 +118,16 @@ definitions:
       name:
         type: string
       password:
+        type: string
+    type: object
+  handler.resetPasswordRequest:
+    properties:
+      new_password:
+        type: string
+      token:
+        description: |-
+          Token is the single-use reset code copied from the email body (S-05). It
+          is never carried in a URL, so it cannot leak via browser history/Referer.
         type: string
     type: object
   handler.statusResponse:
@@ -215,6 +235,45 @@ info:
   title: Task Management API
   version: "1.0"
 paths:
+  /api/v1/auth/forgot-password:
+    post:
+      consumes:
+      - application/json
+      description: Always returns the same generic acknowledgement whether or not
+        the email is registered. When the account exists, a single-use reset code
+        (15-minute default TTL) is emailed in the message body — never embedded in
+        a URL — via a bounded, panic-recovered async workflow. The synchronous path
+        does identical work for known and unknown emails (no timing oracle). Rate-limited
+        per client IP.
+      parameters:
+      - description: Account email
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.forgotPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: generic acknowledgement (no account-existence signal)
+          schema:
+            $ref: '#/definitions/handler.messageResponse'
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "429":
+          description: rate_limited (Retry-After header)
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Request a password reset code
+      tags:
+      - auth
   /api/v1/auth/login:
     post:
       consumes:
@@ -398,6 +457,40 @@ paths:
           schema:
             $ref: '#/definitions/handler.errorEnvelope'
       summary: Register a new account
+      tags:
+      - auth
+  /api/v1/auth/reset-password:
+    post:
+      consumes:
+      - application/json
+      description: Consumes the valid single-use reset code copied from the email
+        body, stores a new argon2id hash, and revokes ALL refresh sessions atomically.
+        Unknown, expired, and already-used codes return the same 401.
+      parameters:
+      - description: Emailed reset code and new password
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.resetPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: password reset; all sessions revoked
+        "400":
+          description: validation_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "401":
+          description: 'unauthorized: invalid, expired, or reused token'
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+        "500":
+          description: internal_error
+          schema:
+            $ref: '#/definitions/handler.errorEnvelope'
+      summary: Reset password with a code
       tags:
       - auth
   /api/v1/projects:
